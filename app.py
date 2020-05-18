@@ -1,30 +1,32 @@
+import os
+import sqlite3
+import json
+from sqlite3 import Error
+
 from flask import Flask, escape, request, jsonify
 import json
 
-aapp = Flask(__name__)
+from werkzeug.utils import secure_filename
+
+app = Flask(__name__)
 
 
-stud = {
-}
+UPLOAD_FOLDER = os.path.join(os.getcwd(), 'files')
+connection = sqlite3.connect('database.db')
+connection.execute('''CREATE TABLE IF NOT EXISTS TESTS
+                    (TEST_ID INTEGER PRIMARY KEY  AUTOINCREMENT NOT NULL,
+                    SUBJECT      TEXT     ,
+                    ANSWER_KEY   TEXT );
+                    ''')
 
-
-
-
-'''
-{"subject":"Math", "answer_key":{"1":"A","2":"A","3":"C","4":"D","5":"C","6":"D","7":"A","8":"C","9":"C","10":"B","11":"A","12":"D","13":"D","14":"C","15":"D","16":"B","17":"C","18":"D","19":"A","20":"A","21":"A","22":"A","23":"C","24":"D","25":"D","26":"D","27":"A","28":"C","29":"C","30":"B","31":"A","32":"D","33":"D","34":"C","35":"C","36":"B","37":"D","38":"D","39":"A","40":"B","41":"D","42":"B","43":"C","44":"D","45":"A","46":"A","47":"B","48":"A","49":"C","50":"D"}}
-
-{"subject":"Distributed Systems", "answer_key":{"1":"B","2":"A","3":"C","4":"D","5":"C","6":"D","7":"A","8":"D","9":"C","10":"D","11":"A","12":"C","13":"B","14":"C","15":"D","16":"D","17":"C","18":"D","19":"A","20":"A","21":"B","22":"A","23":"C","24":"D","25":"D","26":"D","27":"A","28":"C","29":"C","30":"B","31":"A","32":"A","33":"D","34":"C","35":"C","36":"B","37":"D","38":"D","39":"A","40":"B","41":"D","42":"B","43":"C","44":"A","45":"A","46":"A","47":"C","48":"B","49":"C","50":"C"}}
-
-{"subject":"Software Design", "answer_key":{"1":"D","2":"A","3":"B","4":"A","5":"B","6":"D","7":"A","8":"D","9":"C","10":"B","11":"A","12":"C","13":"C","14":"C","15":"A","16":"D","17":"A","18":"D","19":"C","20":"A","21":"C","22":"A","23":"C","24":"D","25":"D","26":"D","27":"A","28":"C","29":"C","30":"C","31":"A","32":"A","33":"B","34":"C","35":"C","36":"C","37":"D","38":"A","39":"A","40":"B","41":"D","42":"A","43":"C","44":"D","45":"A","46":"A","47":"D","48":"B","49":"C","50":"C"}}
-'''
-
-
-
-
-tests = {} #[{"subject":"Math","answer_key":{"1":"A","..":"..","50":"B"}}, etc...]
-test_ids = []
-sid = 0
-tid = 0
+connection.execute('''CREATE TABLE IF NOT EXISTS SUBMISSIONS
+                        (SCANTRON_ID INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL ,
+                        SCANTRON_URL TEXT ,
+                        NAME           TEXT ,
+                        SUBJECT      TEXT ,
+                        SUBMISSION   TEXT,
+                        SCORE          INT );''')
+connection.close()
 
 
 @app.route('/')
@@ -33,57 +35,124 @@ def hello():
     return f'Hello, {escape(name)}!'
 
 
-
-
 @app.route('/api/tests/', methods=['POST'])
 def create_test():
-    global tid
-    req = request.json
-    print(req)
-    temp = {
-        "test_id":str(tid),
-        "subject":req["subject"],
-        "answer_key":req["answer_key"],
-        "submissions":[]
-    }
-    tests[req["subject"]] = temp
-    tid += 1
-    test_ids.append(temp)
-    return temp, 201
+    temp = request.get_json()
+    subject = temp["subject"]
+    print(subject)
+    answer_keys = temp['answers_key']
+    answer_keys_str = json.dumps(answer_keys)
+
+    try:
+        connection = sqlite3.connect('database.db')
+        result = connection.execute("INSERT INTO TESTS (SUBJECT) VALUES (?)", subject)
+        connection.executemany("INSERT INTO TESTS (ANSWER_KEY) VALUES (?)", answer_keys_str)
+        connection.commit()
+        response_body = {"test_id": result.lastrowid, "subject": subject, "answer_keys": answer_keys, "submissions": []}
+        return jsonify(response_body), 201 + "Created"
+
+    except Error as error:
+        print(error)
+
+    finally:
+        if connection:
+            connection.close()
+    return "Error occurred", 400
 
 
-@app.route('/api/tests/<id>', methods=['GET'])
-def get_tests(id=0):
-    return test_ids[int(id)], 201
+@app.route('/api/tests/<test_id>', methods=['GET'])
+def get_tests(test_id):
+    try:
+        connection = sqlite3.connect('database.db')
+        test = connection.execute("SELECT * FROM TESTS WHERE TEST_ID = ?", [test_id])
+        subject = test.fetchone()[1]
+        expected_answers = connection.execute("SELECT ANSWER_KEY FROM TESTS WHERE TEST_ID = ?", [test_id])
+        submissions = connection.execute("SELECT * FROM SUBMISSIONS WHERE TEST_ID = ?", [test_id])
+        expected_answers = json.loads(expected_answers)
+        submission_result = []
+
+        for submission_row in submissions:
+            score = 0
+            result = {}
+            scantron_id = submission_row[0]
+            scantron_url = submission_row[1]
+            name = submission_row[2]
+            submitted_answers = submission_row[4]
+            submitted_answers = json.loads(submitted_answers)
+
+            for key in expected_answers:
+                result[key] = {"actual": submitted_answers[key],
+                               "expected": expected_answers[key]}
+
+            submission_result.append({"scantron_id": scantron_id,
+                                      "scantron_url": scantron_url,
+                                      "name": name,
+                                      "subject": subject,
+                                      "score": score,
+                                      "result": result})
+
+        response = {"test_id": test_id,
+                    "subject": subject,
+                    "answer_keys": expected_answers,
+                    "submissions": submission_result}
+        return jsonify(response), 200
+
+    except Error as error:
+        print(error)
+
+    finally:
+        if connection:
+            connection.close()
+    return "Error occurred", 400
 
 
-@app.route('/api/tests/<id>/scantrons/', methods=['POST'])
-def upload_scantron(id=0):
-    global sid
-    req = request.json
-    temp = {
-        "name":req["name"],
-        "scantron_id":str(sid),
-        "subject":req["subject"],
-        "score":"",
-        "result":""
-    }
-    graded = grade_scantron(req["answers"], test_ids[int(id)]["answer_key"])
-    temp["score"] = str(graded[0])
-    temp["result"] = graded[1]
-    test_ids[int(id)]["submissions"].append(temp)
-    return temp, 201
+@app.route('/api/tests/<test_id>/scantrons/', methods=['POST'])
+def upload_scantron(test_id):
+    file = request.files['data']
+    file.filename = secure_filename(file.filename)
+    filepath = "http://localhost:5000/files/" + file.filename
+    file.save(os.path.join(app.config['UPLOAD_FOLDER'], file.filename))
+    data = json.load(open((os.path.join(app.config['UPLOAD_FOLDER'], file.filename))))
+
+    try:
+        connection = sqlite3.connect('database.db')
+        name = data["name"]
+        subject = data["subject"]
+        answers = data["answers"]
+        correct_answers = connection.execute("SELECT ANSWER_KEY FROM TESTS WHERE TEST_ID = ?", [test_id])
+        correct_answers = json.loads(correct_answers)
+        score = 0
+        result = {}
+
+        for key in correct_answers:
+            if correct_answers[key] == answers[key]:
+                score += 1
+            result[key] = {"actual": answers[key],
+                           "expected": correct_answers[key]}
+
+        submission_values = [test_id, name, filepath, subject, score]
+        submission = connection.execute(
+            "INSERT INTO submissions (TEST_ID, NAME, SCANTRON_URL, SUBJECT, SCORE) VALUES (?,?,?,?,?)",
+            submission_values)
+        result_values = [(submission.lastrowid, question_number, value) for question_number, value in answers.items()]
+        connection.executemany("INSERT INTO RESULT VALUES (?, ?, ?)", result_values)
+        connection.commit()
+        response = {"scantron_id": submission.lastrowid,
+                    "scantron_url": filepath,
+                    "name": name,
+                    "subject": subject,
+                    "score": score,
+                    "result": result}
+        return jsonify(response), 200
+
+    except Error as error:
+        print(error)
+
+    finally:
+        if connection:
+            connection.close()
+    return "Error occurred.", 400
 
 
-def grade_scantron(answers, key):
-    graded = {}
-    score = 0
-    for question, answer in answers.items():
-        temp = {
-            "actual":answer,
-            "expected":key[question]
-        }
-        graded[question] = temp
-        if (answer == key[question]):
-            score += 1
-    return [score, graded]
+if __name__ == '__main__':
+    app.run()
